@@ -16,13 +16,18 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.IntentCompat
@@ -98,6 +104,7 @@ private fun AppTheme(content: @Composable () -> Unit) {
 private fun MainScreen(vm: MainViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val working = state.status is Status.Working
 
     val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.setInput(uri)
@@ -112,6 +119,9 @@ private fun MainScreen(vm: MainViewModel) {
         Column(
             modifier = Modifier
                 .padding(padding)
+                // Lift the content above the keyboard (the bars are already covered by `padding`).
+                .consumeWindowInsets(padding)
+                .imePadding()
                 .padding(horizontal = 24.dp, vertical = 16.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -133,7 +143,7 @@ private fun MainScreen(vm: MainViewModel) {
                     )
                     Button(
                         onClick = { pickPdf.launch(arrayOf("application/pdf")) },
-                        enabled = state.status !is Status.Working,
+                        enabled = !working,
                     ) {
                         Text(if (state.inputUri == null) "Choose PDF" else "Choose a different PDF")
                     }
@@ -146,15 +156,17 @@ private fun MainScreen(vm: MainViewModel) {
                     SegmentedButton(
                         selected = state.style == style,
                         onClick = { vm.setStyle(style) },
+                        enabled = !working,
                         shape = SegmentedButtonDefaults.itemShape(index, RuleStyle.entries.size),
                     ) { Text(style.label) }
                 }
             }
 
-            OutlinedTextField(
+            if (state.needsSpacing) OutlinedTextField(
                 value = state.spacingText,
                 onValueChange = vm::setSpacingText,
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !working,
                 label = { Text(if (state.style == RuleStyle.GRID) "Square size" else "Line spacing") },
                 suffix = { Text("mm") },
                 singleLine = true,
@@ -164,6 +176,40 @@ private fun MainScreen(vm: MainViewModel) {
                 } else null,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             )
+
+            // --- De-duplicate by page label (always on in dedupe-only mode)
+            if (!state.needsSpacing) {
+                Text(
+                    "Only removes duplicate pages: where several pages share a page label, " +
+                        "the last one is kept. Pages with no label are always kept. No ruled " +
+                        "pages are added, and page size and content stay untouched.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .toggleable(
+                        value = state.removeDuplicates,
+                        enabled = !working,
+                        role = Role.Checkbox,
+                        onValueChange = vm::setRemoveDuplicates,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // The Row handles the click, so the checkbox itself has no handler.
+                Checkbox(checked = state.removeDuplicates, onCheckedChange = null)
+                Column {
+                    Text("Remove duplicate pages", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Where several pages share a page label, keep only the last one. " +
+                            "Pages with no label are always kept.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
 
             // --- Go
             Button(
@@ -191,6 +237,7 @@ private fun MainScreen(vm: MainViewModel) {
                 }
                 is Status.Done -> {
                     Text("Saved ${s.name}", style = MaterialTheme.typography.titleMedium)
+                    if (s.note != null) Text(s.note, style = MaterialTheme.typography.bodyMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(onClick = { openPdf(context, s.uri) }) { Text("Open") }
                         OutlinedButton(onClick = { sharePdf(context, s.uri) }) { Text("Share") }

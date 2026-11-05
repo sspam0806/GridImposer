@@ -2,11 +2,15 @@ package com.gridimpose
 
 import android.content.Context
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.cos.COSDictionary
+import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.multipdf.LayerUtility
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
+import com.tom_roush.pdfbox.pdmodel.common.PDNumberTreeNode
+import com.tom_roush.pdfbox.pdmodel.common.PDPageLabelRange
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.util.Matrix
 import java.io.InputStream
@@ -14,11 +18,21 @@ import java.io.OutputStream
 
 enum class RuleStyle(val label: String, val defaultSpacingMm: Float) {
     /** Horizontal ruled lines only. */
-    LINES("Lines", 9.5f),
+    LINES("Lines", 5f),
 
     /** Square grid (vertical + horizontal lines). */
     GRID("Grid", 5f),
+
+    /** No ruled pages and no imposition: only remove duplicate pages, keep everything else as is. */
+    DEDUPE_ONLY("Dedupe only", 5f),
 }
+
+/**
+ * @property pagesIn      number of pages in the input PDF
+ * @property pagesKept    number of pages that went into the output (after optional de-duplication)
+ * @property hadLabels    whether the input defines any page labels at all
+ */
+data class ProcessResult(val pagesIn: Int, val pagesKept: Int, val hadLabels: Boolean)
 
 /**
  * Same result as the original Python scripts:
@@ -54,24 +68,94 @@ object PdfProcessor {
         output: OutputStream,
         style: RuleStyle,
         spacingMm: Float,
+        removeDuplicateLabels: Boolean,
         onProgress: (done: Int, total: Int) -> Unit,
-    ) {
+    ): ProcessResult {
         PDFBoxResourceLoader.init(context.applicationContext)
+        if (style == RuleStyle.DEDUPE_ONLY) return dedupeOnly(input, output)
         val spacingPt = spacingMm * PT_PER_MM
 
         // Temp-file storage keeps big PDFs out of the Java heap.
-        PDDocument.load(input, MemoryUsageSetting.setupTempFileOnly()).use { src ->
+        return PDDocument.load(input, MemoryUsageSetting.setupTempFileOnly()).use { src ->
             PDDocument(MemoryUsageSetting.setupTempFileOnly()).use { out ->
                 val layers = LayerUtility(out)
-                val total = src.numberOfPages
-                onProgress(0, total)
-                for (i in 0 until total) {
-                    addSheet(src, out, layers, src.getPage(i), style, spacingPt)
-                    onProgress(i + 1, total)
+                val pagesIn = src.numberOfPages
+
+                val labels = readPageLabels(src)
+                val keep = if (removeDuplicateLabels && labels != null) {
+                    pagesToKeep(labels)
+                } else {
+                    (0 until pagesIn).toList()
+                }
+
+                onProgress(0, keep.size)
+                keep.forEachIndexed { n, pageIndex ->
+                    addSheet(src, out, layers, src.getPage(pageIndex), style, spacingPt)
+                    onProgress(n + 1, keep.size)
                 }
                 out.save(output)
+                ProcessResult(pagesIn, keep.size, hadLabels = labels != null)
             }
         }
+    }
+
+    /**
+     * Only the duplicate removal: the surviving pages are saved untouched (same size, content,
+     * rotation, annotations), with no ruled pages and no wider sheets.
+     *
+     * Like the PyMuPDF script, the output carries no page labels: they are indexed by page
+     * number and would be wrong once pages are gone.
+     */
+    private fun dedupeOnly(input: InputStream, output: OutputStream): ProcessResult {
+        return PDDocument.load(input, MemoryUsageSetting.setupTempFileOnly()).use { doc ->
+            val pagesIn = doc.numberOfPages
+            val labels = readPageLabels(doc)
+            val keep = if (labels != null) pagesToKeep(labels) else (0 until pagesIn).toList()
+            val keepSet = keep.toHashSet()
+
+            // Remove from the end so the remaining indices stay valid.
+            for (i in pagesIn - 1 downTo 0) {
+                if (i !in keepSet) doc.removePage(i)
+            }
+            doc.documentCatalog.cosObject.removeItem(COSName.PAGE_LABELS)
+            doc.save(output)
+            ProcessResult(pagesIn, keep.size, hadLabels = labels != null)
+        }
+    }
+
+    /**
+     * Same rule as the dedupe script: pages without a label are always kept; of all pages
+     * sharing a label, only the last one is kept.
+     */
+    private fun pagesToKeep(labels: Array<String>): List<Int> {
+        val last = HashMap<String, Int>()
+        labels.forEachIndexed { i, label -> if (label.isNotEmpty()) last[label] = i }
+        return labels.indices.filter { i -> labels[i].isEmpty() || last[labels[i]] == i }
+    }
+
+    /**
+     * The label of every page ("" = no label), or null if the PDF defines no page labels.
+     *
+     * PDFBox always injects a default decimal range at page 0, so a PDF whose numbering starts
+     * later (say an unlabelled cover) would get cover = "1" and clash with the real page 1.
+     * To match PyMuPDF, pages before the first range actually stored in the file stay "".
+     */
+    private fun readPageLabels(doc: PDDocument): Array<String>? {
+        val catalog = doc.documentCatalog
+        val dict = catalog.cosObject.getDictionaryObject(COSName.PAGE_LABELS) as? COSDictionary
+            ?: return null
+        val firstRangeStart = firstRangeStart(PDNumberTreeNode(dict, PDPageLabelRange::class.java))
+            ?: return null
+        val computed = catalog.pageLabels?.labelsByPageIndices ?: return null
+        return Array(computed.size) { i ->
+            if (i < firstRangeStart) "" else computed[i] ?: ""
+        }
+    }
+
+    private fun firstRangeStart(node: PDNumberTreeNode): Int? {
+        val kids = node.kids
+        if (kids != null) return kids.mapNotNull { firstRangeStart(it) }.minOrNull()
+        return node.numbers?.keys?.filter { it >= 0 }?.minOrNull()
     }
 
     private fun addSheet(
