@@ -60,7 +60,7 @@ object PdfProcessor {
     // Outline around each page, and the gap between the two pages (all in points).
     private const val BORDER_WIDTH = 1f
     private const val BORDER_GRAY = 0.8f
-    private const val PAGE_GAP = 12f
+    private const val PAGE_GAP = 0f
 
     fun process(
         context: Context,
@@ -230,8 +230,8 @@ object PdfProcessor {
             drawRules(cs, x0 = rightX, width = pageW, height = pageH, style = style, spacingPt = spacingPt)
 
             // Outline around both pages, drawn last so it sits on top.
-            drawBorder(cs, x0 = 0f, width = pageW, height = pageH)
-            drawBorder(cs, x0 = rightX, width = pageW, height = pageH)
+            // drawBorder(cs, x0 = 0f, width = pageW, height = pageH)
+            // drawBorder(cs, x0 = rightX, width = pageW, height = pageH)
         }
     }
 
